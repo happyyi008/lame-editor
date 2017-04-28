@@ -3,15 +3,23 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 
+#define LED_VERSION "0.0.1"
+
 #define CTRL_KEY(k) ((k) & 0x1f)
 
-#define M_TOP "\x1b[H"
-#define M_BTMR "\x1b[999C\x1b[999B"
-#define CLR_SCRN "\x1b[2J"
-#define GET_CUR_POS "\x1b[6n"
+#define M_TOP "\x1b[H", 3
+#define M_BTMR "\x1b[999C\x1b[999B", 12
+#define CLR_SCRN "\x1b[2J", 4
+#define GET_CUR_POS "\x1b[6n", 4
+#define CLR_LINE "\x1b[K", 3
+#define CURS_ON "\x1b[?25h", 6
+#define CURS_OFF "\x1b[?25l", 6
+
+#define ABUF_INIT {NULL, 0}
 
 struct editorConfig {
     int screenrows;
@@ -19,11 +27,29 @@ struct editorConfig {
     struct termios orig_termios;
 };
 
+struct abuf {
+    char* b;
+    int len;
+};
+
 struct editorConfig E;
 
+void abAppend(struct abuf* ab, const char* s, int len) {
+    char* new = realloc(ab->b, ab->len + len);
+
+    if (new == NULL) return;
+    memcpy(new+(ab->len), s, len);
+    ab->b = new;
+    ab->len += len;
+}
+
+void abFree(struct abuf *ab) {
+    free(ab->b);
+}
+
 void editorClearScreen() {
-    write(STDIN_FILENO, CLR_SCRN, 4);
-    write(STDIN_FILENO, M_TOP, 3);
+    write(STDIN_FILENO, CLR_SCRN);
+    write(STDIN_FILENO, M_TOP);
 }
 
 void die(const char* s) {
@@ -54,20 +80,42 @@ void enableRawMode() {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
 
-void editorDrawRows() {
-    int y;
+void drawWelcom(struct abuf* ab){
+    char welcom[80];
+    int welcomlen;
+    int padding;
 
-    for (y = 0; y < E.screenrows-1; y++) {
-        write(STDIN_FILENO, "~\r\n", 3);
-    }
-    write(STDIN_FILENO, "~", 1);
+    welcomlen = snprintf(welcom, sizeof(welcom),
+                         "Led Editor -- version %s",
+                         LED_VERSION);
+    if (E.screencols < welcomlen) welcomlen = E.screencols;
+    padding = (E.screencols - welcomlen) / 2;
+    while (padding--) abAppend(ab, " ", 1);
+    abAppend(ab, welcom, welcomlen);
 
 }
 
+void editorDrawRows(struct abuf* ab) {
+    int y;
+
+    for (y = 0; y < E.screenrows-1; y++) {
+        if (y == E.screenrows / 3) drawWelcom(ab);
+        abAppend(ab, CLR_LINE);
+        abAppend(ab, "~\r\n", 3);
+    }
+    abAppend(ab, CLR_LINE);
+    abAppend(ab, "~", 1);
+}
+
 void editorRefreshScreen() {
-    editorClearScreen();
-    editorDrawRows();
-    write(STDIN_FILENO, M_TOP, 3);
+    struct abuf ab = ABUF_INIT;
+
+    abAppend(&ab, CURS_OFF);
+    editorDrawRows(&ab);
+    abAppend(&ab, M_TOP);
+    abAppend(&ab, CURS_ON);
+    write(STDIN_FILENO, ab.b, ab.len);
+    abFree(&ab);
 }
 
 char editorReadKey() {
@@ -93,7 +141,7 @@ void processKeypress() {
 int getCursorPosition(int* rows, int* cols) {
     char buf[32];
     unsigned int i = 0;
-    if (write(STDIN_FILENO, GET_CUR_POS, 4) != 4) return -1;
+    if (write(STDIN_FILENO, GET_CUR_POS) != 4) return -1;
 
     while (i < sizeof(buf) - 1) {
         if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
@@ -112,7 +160,7 @@ int getWindowSize(int *rows, int *cols) {
     struct winsize ws;
 
     if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        if(write(STDIN_FILENO, M_BTMR, 12) != 12) die("move cursor to bottom right");
+        if(write(STDIN_FILENO, M_BTMR) != 12) die("move cursor to bottom right");
         return getCursorPosition(rows, cols);
     }else {
         *cols = ws.ws_col;
