@@ -50,10 +50,12 @@ typedef struct erow {
 struct editorConfig {
     int cx;
     int cy;
+    int rowoff;
+    int coloff;
     int screenrows;
     int screencols;
     int numrows;
-    erow row;
+    erow* row;
     struct termios orig_termios;
 };
 
@@ -120,38 +122,58 @@ void drawWelcome(struct abuf* ab){
                          LED_VERSION);
     if (E.screencols < welcomlen) welcomlen = E.screencols;
     padding = (E.screencols - welcomlen) / 2 - 1;
-    abAppend(ab, "~", 1);
     while (padding--) abAppend(ab, " ", 1);
     abAppend(ab, welcom, welcomlen);
 
+}
+
+void editorScroll() {
+    if (E.cy < E.rowoff) {
+        E.rowoff = E.cy;
+    }
+    if (E.cx < E.coloff) {
+        E.coloff = E.cx;
+    }
+
+    if (E.cy >= E.rowoff + E.screenrows) {
+        E.rowoff = E.cy - E.screenrows + 1;
+    }
+    if (E.cx >= E.coloff + E.screencols) {
+        E.coloff = E.cx - E.screencols + 1;
+    }
 }
 
 void editorDrawRows(struct abuf* ab) {
     int y;
 
     for (y = 0; y < E.screenrows; y++) {
-        if (y >= E.numrows) {
-            if (E.numrows == 0 && y == E.screenrows / 3) drawWelcome(ab);
-            abAppend(ab, CLR_LINE);
+        int filerow = y + E.rowoff;
+        if (filerow >= E.numrows) {
             abAppend(ab, "~", 1);
-            if (y < E.screencols - 1) abAppend(ab, "\r\n", 3);
+            if (E.numrows == 0 && y == E.screenrows / 3) drawWelcome(ab);
         } else {
-            int len = E.row.size;
+            int len = E.row[filerow].size - E.coloff;
+             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
-            abAppend(ab, E.row.chars, len);
+            abAppend(ab, &E.row[filerow].chars[E.coloff], len);
         }
-        
+
+        abAppend(ab, CLR_LINE);
+        if (y < E.screenrows - 1) abAppend(ab, "\r\n", 2);
     }
 }
 
 void editorRefreshScreen() {
+    editorScroll();
+
     struct abuf ab = ABUF_INIT;
 
     abAppend(&ab, CURS_OFF);
+    abAppend(&ab, M_TOP);
     editorDrawRows(&ab);
 
     char buf[32];
-    snprintf(buf, sizeof(buf), SET_CURS_POS, E.cy + 1, E.cx + 1);
+    snprintf(buf, sizeof(buf), SET_CURS_POS, (E.cy - E.rowoff) + 1, (E.cx - E.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
 
     abAppend(&ab, CURS_ON);
@@ -209,19 +231,34 @@ int editorReadKey() {
 }
 
 void editorMoveCursor(int key) {
+    erow* row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
     switch (key) {
         case ARROW_LEFT:
-            if (E.cx != 0) E.cx--;
+            if (E.cx != 0) {
+                E.cx--;
+            } else if (E.cy > 0) {
+                E.cy--;
+                E.cx = E.row[E.cy].size;
+            }
             break;
         case ARROW_RIGHT:
-            if (E.cx != E.screencols) E.cx++;
+            if (row && E.cx < row->size) {
+                E.cx++;
+            } else if (row && E.cy == E.row->size) {
+                E.cy++;
+                E.cx = 0;
+            }
             break;
         case ARROW_UP:
             if (E.cy != 0)  E.cy--;
             break;
         case ARROW_DOWN:
-            if (E.cy != E.screenrows)  E.cy++;
+            if (E.cy < E.screenrows)  E.cy++;
             break;
+    }
+    row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+    if (row && E.cx > row->size) {
+        E.cx = row->size;
     }
 }
 
@@ -287,6 +324,16 @@ int getWindowSize(int *rows, int *cols) {
     }
 }
 
+void editorAppendRow(char *s, size_t len) {
+    E.row = realloc(E.row, sizeof(erow)*(E.numrows + 1));
+
+    int at = E.numrows;
+    E.row[at].size = len;
+    E.row[at].chars = malloc(len + 1);
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+    E.numrows++;
+}
 
 // file io
 void editorOpen(char* filename) {
@@ -296,19 +343,12 @@ void editorOpen(char* filename) {
     char *line = NULL;
     size_t linecap = 0;
     ssize_t linelen;
-    linelen = getline(&line, &linecap, fp);
-    if (linelen != -1) {
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
         while (linelen > 0 && (line[linelen - 1] == '\n' ||
                                line[linelen - 1] == '\r'))
             linelen--;
-    
-        E.row.size = linelen;
-        E.row.chars = malloc(linelen + 1);
-        memcpy(E.row.chars, line, linelen);
-        E.row.chars[linelen] = '\0';
-        E.numrows = 1;
+        editorAppendRow(line, linelen);
     }
-
     free(line);
     fclose(fp);
 }
@@ -316,7 +356,10 @@ void editorOpen(char* filename) {
 void initEditor() {
     E.cx = 0;
     E.cy = 0;
+    E.rowoff = 0;
+    E.coloff = 0;
     E.numrows = 0;
+    E.row = NULL;
     if(getWindowSize( &E.screenrows, &E.screencols) != 0) die("getWindowSize");
 }
 
